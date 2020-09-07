@@ -1,0 +1,414 @@
+'''
+Simple JSON-RPC 1.0 "client" implementation for invoking bitcoind and similar servers.
+'''
+import json
+from random import randint
+
+import requests
+
+from django.conf import settings
+
+
+def rpc_request(currencycode, method, parameters=[]):
+    '''
+    Helper function used by all RPC methods to actually make the request.
+
+    :param currencycode: the currencycode identify which daemon to invoke.
+    :param method: the RPC method to invoke.
+    :param parameters: optional parameters for the RPC method.
+    :return: the result of making the query.
+    '''
+
+    try:
+        rpcauth = settings.COINS[currencycode]['rpcauth']
+    except:
+        print("%s rpcauth not defined in settings.py" % (currencycode,))
+        return False
+    try:
+        server = settings.COINS[currencycode]['server']
+    except:
+        print("%s server not defined in settings.py" % (currencycode,))
+        return False
+
+    url = "http://" + rpcauth + "@" + server
+    headers = {'content-type': 'application/json'}
+
+    # Set a unique ID for each RPC request. The ID is returned in the response. For our needs it shouldn't be
+    # relevant, but we assert that we always get the same ID back as otherwise something has gone wrong.
+    payload_id = randint(1, 99999)
+
+    # Build a basic RPC 1.0 request payload.
+    payload = {
+        "method": method,
+        "params": parameters,
+        "id": payload_id,
+    }
+    # Post the request payload and collect the response.
+    try:
+        response = requests.post(url, data=json.dumps(payload), headers=headers)
+    except Exception as e:
+        print("failed to connect to %s (%s)" % (url, e))
+        return False
+
+
+    #print("payload: %s" % payload)
+    #print("response: %s" % response)
+
+    try:
+        status_code = response.status_code
+    except:
+        print("RPC fatal error: invalid response, verify daemeon is running and rpcauth credentials")
+        return False
+
+    response = response.json()
+    #print("response (decoded): %s" % response)
+
+    if 'error' in response and response['error'] is not None:
+        print("RPC error (%d) for method %s: %s" % (status_code, method, response['error']))
+        return False
+
+    if 'errors' in response and response['errors'] is not None:
+        for error in response['errors']:
+            print("RPC error (%d) for method %s: %s" % (status_code, method, error))
+        return False
+
+    # We must get back our ID, or something went very wrong.
+    assert response["id"] == payload_id
+
+    return response["result"]
+
+methods = {
+    'abandontransaction': {
+        # https://bitcoin.org/en/developer-reference#abandontransaction
+        'description': 'Mark this transaction and all its in-wallet descendants as abandoned which will allow for their'
+                       ' inputs to be respent. It can be used to replace "stuck" or evicted transactions.'
+                       ' It only works on transactions which are not included in a block and are not currently in the'
+                       ' mempool. It has no effect on transactions which are already conflicted or abandoned.',
+        'parameters': [
+            {
+                'parameter': 'txid',
+                'description': 'hex encoded TXID of transaction to abandon',
+                'required': True,
+                'format': 'hex',
+            },
+        ],
+    },
+    'createrawtransaction': {
+        # https://bitcoin.org/en/developer-reference#createrawtransaction
+        'description': 'Create an unsigned serialized transaction that spends a previous output. The transaction is not'
+                       'stored in the wallet or transmitted to the network.',
+        'parameters': [
+            {
+                'parameter': 'inputs',
+                'description': 'array of input objects',
+                'required': True,
+                'format': 'array',
+            },
+            {
+                'parameter': 'outputs',
+                'description': 'output object',
+                'required': True,
+                'format': 'object',
+            },
+            {
+                'parameter': 'locktime',
+                'required': False,
+                'format': 'array',
+                'description': 'earliest time transaction can be added to the block chain',
+            },
+        ],
+    },
+    #The decoderawtransaction RPC decodes a serialized transaction hex string into a JSON object describing the
+    #transaction.
+    'decoderawtransaction': {
+        # https://bitcoin.org/en/developer-reference#createrawtransaction
+        'description': 'Decode a serialized transaction hex string into a JSON object.',
+        'parameters': [
+            {
+                'parameter': 'serialized_transaction',
+                'required': True,
+                'format': 'hex',
+                'description': 'a serialized transaction, for example generated by createrawtransaction',
+            },
+        ],
+    },
+    'estimatefee': {
+        # https://bitcoin.org/en/developer-reference#estimatefee
+        'description': 'Estimate the per-kilobyte transaction fee that needs to be paid for a transaction to be'
+                       ' included within a certain number of blocks',
+        'parameters': [
+            {
+                'parameter': 'number_of_blocks',
+                'required': True,
+                'format': 'int',
+                'description': 'the maximum number of blocks a transaction should have to wait before it is predicted to be'
+                               ' included in a block. Has to be a value from 2 to 25.'
+            },
+        ],
+    },
+    'estimaterawfee': {
+        # https://bitcoin.org/en/developer-reference#estimatefee
+        'description': 'Estimate the approximate per-kilobyte fee that needs to be paid for a transaction to be'
+                       ' included within a certain number of blocks. Uses virtual transaction size as defined in BIP'
+                       ' 141 (witness data is discounted). WARNING: This is an advanced API call that is tightly'
+                       ' coupled to the specific implementation of fee estimation. The parameters it can be called with'
+                       ' and the results it returns will change if the internal implementation changes.',
+        'parameters': [
+            {
+                'parameter': 'number_of_blocks',
+                'required': True,
+                'format': 'int',
+                'description': 'the maximum number of blocks a transaction should have to wait before it is predicted to be'
+                               ' included in a block. Has to be a value from 2 to 25.'
+            },
+            {
+                'parameter': 'threshold',
+                'required': False,
+                'default': 0.95,
+                'format': 'float',
+                'description': 'The proportion of transactions in a given feerate range that must have been confirmed'
+                               ' within number_of_blocks in order to consider those feerates as high enough and proceed'
+                               ' to check lower buckets. Default: 0.95.',
+            },
+        ],
+    },
+    'estimatesmartfee': {
+        # https://bitcoin.org/en/release/v0.15.0#fee-estimation-improvements
+        'description': 'Estimates the approximate per-kilobyte fee needed for a transaction to begin confirmation'
+                       ' within number_of_blocks if possible and return the number of blocks for which the estimate is'
+                       ' valid. Uses virtual transaction size as defined in BIP 141 (witness data is discounted).',
+        'parameters': [
+            {
+                'parameter': 'number_of_blocks',
+                'required': True,
+                'format': 'int',
+                'description': 'the maximum number of blocks a transaction should have to wait before it is predicted'
+                               ' to be included in a block.'
+            },
+            {
+                'parameter': 'estimate_mode',
+                'description': 'whether to return a more conservative estimate which also satisfies a longer history.'
+                               ' A conservative estimate potentially returns a higher feerate and is more likely to be'
+                               ' sufficient for the desired target, but is not as responsive to short term drops in the'
+                               ' prevailing fee market. Must be one of: UNSET, CONSERVATIVE, ECONOMICAL.',
+                'required': False,
+                'default': 'CONSERVATIVE',
+                'format': 'string',
+            },
+        ],
+    },
+    'getbestblockhash': {
+        # https://bitcoin.org/en/developer-reference#getbestblockhash
+        'description': 'Return the header hash of the most recent block on the best block chain.',
+        'parameters': [],
+    },
+    'getblock': {
+        # https://bitcoin.org/en/developer-reference#getblock
+        'description': 'Return the block with a specific hash.',
+        'parameters': [
+            {
+                'parameter': 'header_hash',
+                'required': True,
+                'format': hex,
+                'description': 'the hash of the block to get',
+            },
+            {
+                'parameter': 'verbosity',
+                'required': False,
+                'format': int,
+                'description': '0 for hex-encoded data, 1 for json-data, 2 for json-data with transaction data',
+            }
+        ],
+    },
+    'getblockcount': {
+        # https://bitcoin.org/en/developer-reference#getblockcount
+        'description': 'Return the number of blocks in the local best block chain.',
+        'parameters': [],
+    },
+    'getblockhash': {
+        # https://bitcoin.org/en/developer-reference#getblockhash
+        'description': 'Return the hash of the block at a given height on the local block chain.',
+        'parameters': [
+            {
+                'parameter': 'height',
+                'required': True,
+                'format': 'int',
+                'description': 'the height of the block whose hash should be returned.',
+            },
+        ],
+    },
+    'getconnectioncount': {
+        # https://bitcoin.org/en/developer-reference#getconnectioncount
+        'description': 'Return the number of connections to other nodes.',
+        'parameters': [],
+    },
+    'getrawtransaction': {
+        # https://bitcoin.org/en/developer-reference#getrawtransaction
+        'description': 'Gets a hex-encoded serialized transaction, or optionally a JSON object.',
+        'parameters': [
+            {
+                'parameter': 'txid',
+                'description': 'hex encoded TXID of transaction to get',
+                'required': True,
+                'format': 'hex',
+            },
+            {
+                'parameter': 'decoded',
+                'description': 'whether or not to decode transaction',
+                'required': False,
+                'default': False,
+                'format': 'bool',
+            },
+        ],
+    },
+    'gettransaction': {
+        # https://bitcoin.org/en/developer-reference#getrawtransaction
+        'description': 'Gets a transaction as a JSON object.',
+        'parameters': [
+            {
+                'parameter': 'txid',
+                'description': 'hex encoded TXID of transaction to get',
+                'required': True,
+                'format': 'hex',
+            },
+        ],
+    },
+    'gettxout': {
+        # https://bitcoin.org/en/developer-reference#gettxout
+        'description': 'Returns details about an unspent transaction output (UTXO).',
+        'parameters': [
+            {
+                'parameter': 'txid',
+                'description': 'hex encoded TXID of transaction containing the output to get',
+                'required': True,
+                'format': 'hex',
+            },
+            {
+                'parameter': 'vout',
+                'description': 'output index number of the output within the transaction',
+                'required': True,
+                'format': 'int',
+            },
+            {
+                'parameter': 'include_unconfirmed',
+                'description': 'whether or not to include unconfirmed outputs from the memory pool',
+                'required': False,
+                'default': False,
+                'format': 'bool',
+            },
+        ],
+    },
+    'sendrawtransaction': {
+        # https://bitcoin.org/en/developer-reference#sendrawtransaction
+        'description': 'Validates a transaction and broadcasts it to the peer-to-peer network.',
+        'parameters': [
+            {
+                'parameter': 'serialized_transaction',
+                'required': True,
+                'format': 'hex',
+                'description': 'a serialized transaction, for example generated by createrawtransaction',
+            },
+            {
+                'parameter': 'allow_high_fees',
+                'description': '(dangerous) whether or not to allow the transaction to pay an abnormally high transaction fee',
+                'required': False,
+                'default': False,
+                # prevent this from accidentally being edited in production: only to be enabled during testing.
+                'assert': False,
+                'format': 'bool',
+            },
+        ],
+    },
+    'signmessagewithprivkey': {
+        # https://bitcoin.org/en/developer-reference#signmessagewithprivkey
+        'description': 'Signs a text message with a private key.',
+        'parameters': [
+            {
+                'parameter': 'private_key',
+                'required': True,
+                'format': 'base58',
+                'description': 'base58-encoded wallet import format (WIF) private key',
+            },
+            {
+                'parameter': 'message',
+                'required': True,
+                'format': 'string',
+                'description': 'the text message to sign',
+            },
+        ],
+    },
+    'signrawtransaction': {
+        # https://bitcoin.org/en/developer-reference#signrawtransaction
+        'description': 'Signs a serialized transaction with one or more private keys.',
+        'parameters': [
+            {
+                'parameter': 'serialized_transaction',
+                'required': True,
+                'format': 'hex',
+                'description': 'a serialized transaction, for example generated by createrawtransaction',
+            },
+            {
+                'parameter': 'unspent_output',
+                'description': '@TODO, understand and document this',
+                'required': False,
+                'default': [],
+                'format': 'array',
+            },
+            {
+                'parameter': 'private_keys',
+                'description': 'private keys to use for signing the transaction',
+                'required': True, # we require it, even though the daemon doesn't
+                'format': 'array',
+            },
+            {
+                'parameter': 'signature_hash_type',
+                'description': 'one of ALL, NONE, SINGLE, ALL|ANYONECANPAY, NONE|ANYONECANPAY, and SINGLE|ANYONECANPAY',
+                'required': True, # we require it, even though the daemon doesn't
+                'format': 'array',
+            },
+        ],
+    },
+    'signrawtransactionwithkey': {
+        # https://bitcoincore.org/en/doc/0.17.0/rpc/rawtransactions/signrawtransactionwithkey/
+        'description': 'Signs a serialized transaction with one or more private keys.',
+        'parameters': [
+            {
+                'parameter': 'serialized_transaction',
+                'required': True,
+                'format': 'hex',
+                'description': 'a serialized transaction, for example generated by createrawtransaction',
+            },
+            {
+                'parameter': 'private_keys',
+                'description': 'private keys to use for signing the transaction',
+                'required': True,  # we require it, even though the daemon doesn't
+                'format': 'array',
+            },
+            {
+                'parameter': 'unspent_output',
+                'description': 'a json array of previous dependent transaction outputs',
+                'required': False,
+                'default': [],
+                'format': 'array',
+            },
+            {
+                'parameter': 'signature_hash_type',
+                'description': 'one of ALL, NONE, SINGLE, ALL|ANYONECANPAY, NONE|ANYONECANPAY, and SINGLE|ANYONECANPAY',
+                'required': True, # we require it, even though the daemon doesn't
+                'format': 'array',
+            },
+        ],
+    },
+    'validateaddress': {
+        # https://bitcoin.org/en/developer-reference#validateaddress
+        'description': 'Determine if an address is valid.',
+        'parameters': [
+            {
+                'parameter': 'address',
+                'required': True,
+                'format': 'hex',
+                'description': 'the address to validate',
+            },
+        ],
+    },
+}

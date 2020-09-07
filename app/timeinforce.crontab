@@ -1,0 +1,1 @@
+*/10 * * * * /usr/local/bin/python /app/manage.py timeinforce > /var/log/timeinforce.log 2>&1

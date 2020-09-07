@@ -1,0 +1,46 @@
+version: '2'
+
+services:
+ web:
+   container_name: web
+   build:
+     context: .
+     dockerfile: containers/web/Dockerfile
+   ports:
+    - "8000:8000"
+   volumes:
+    - .:/app
+   links:
+    - db
+    - audit01
+   external_links:
+    - addressapi
+   networks:
+    - shared
+
+ db:
+   container_name: db
+   image: "postgres:10.5"
+   ports:
+     - 5432
+   environment:
+     POSTGRES_PASSWORD: locald3v
+   networks:
+    - shared
+
+ audit01:
+   container_name: audit01
+   build:
+     context: .
+     dockerfile: containers/audit01/Dockerfile
+   ports:
+    - "514:514" # Syslog over UDP
+    - "6514:6514" # Syslog over TLS
+   volumes:
+    - .:/app
+   networks:
+    - shared
+
+networks:
+  shared:
+    external: true
